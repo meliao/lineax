@@ -53,10 +53,14 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
     - `preconditioner`: A [`lineax.AbstractLinearOperator`][]
         to be used as preconditioner. Defaults to
         [`lineax.IdentityLinearOperator`][]. This method uses left preconditioning,
-        so it is the preconditioned residual that is minimized, though the actual
-        termination criteria uses the un-preconditioned residual.
+        so it is the preconditioned residual that is minimized. The convergence
+        check uses the preconditioned residual by default, but can be switched to
+        the raw residual via `use_preconditioned_residual=False`.
     - `y0`: The initial estimate of the solution to the linear system. Defaults to all
         zeros.
+    - `use_preconditioned_residual`: Whether to use the preconditioned residual
+        (left-preconditioned) in the convergence check. Defaults to True. If False,
+        then the raw residual (b - Ay) is used in the convergence check.
     """
 
     rtol: float
@@ -123,6 +127,13 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
             b_scale = (self.atol + self.rtol * ω(vector).call(jnp.abs)).ω
         operator = state
         preconditioner, y0 = preconditioner_and_y0(operator, vector, options)
+        try:
+            use_preconditioned_residual = options["use_preconditioned_residual"]
+        except KeyError:
+            use_preconditioned_residual = False
+        else:
+            if not isinstance(use_preconditioned_residual, bool):
+                raise ValueError("`use_preconditioned_residual` must be a bool.")
         leaves, _ = jtu.tree_flatten(vector)
         size = sum(leaf.size for leaf in leaves)
         if self.max_steps is None:
@@ -131,21 +142,32 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
             max_steps = self.max_steps
         restart = min(self.restart, size)
 
-        def not_converged(r, diff, y):
+        def not_converged(residual, diff, y):
             # The primary tolerance check.
             # Given Ay=b, then we have to be doing better than `scale` in both
             # the `y` and the `b` spaces.
             if has_scale:
                 with jax.numpy_dtype_promotion("standard"):
                     y_scale = (self.atol + self.rtol * ω(y).call(jnp.abs)).ω
-                    norm1 = self.norm((r**ω / b_scale**ω).ω)  # pyright: ignore
+                    norm1 = self.norm((residual**ω / b_scale**ω).ω)  # pyright: ignore
                     norm2 = self.norm((diff**ω / y_scale**ω).ω)
                 return (norm1 > 1) | (norm2 > 1)
             else:
                 return True
 
         def cond_fun(carry):
-            y, r, _, deferred_breakdown, diff, _, step, stagnation_counter, _ = carry
+            (
+                y,
+                r,
+                raw_residual,
+                _,
+                deferred_breakdown,
+                diff,
+                _,
+                step,
+                stagnation_counter,
+                _,
+            ) = carry
             # NOTE: we defer ending due to breakdown by one loop! This is nonstandard,
             # but lets us use a cauchy-like condition in the convergence criteria.
             # If we do not defer breakdown, breakdown may detect convergence when
@@ -154,7 +176,8 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
             out = jnp.invert(deferred_breakdown) & (
                 stagnation_counter < self.stagnation_iters
             )
-            out = out & not_converged(r, diff, y)
+            residual_for_check = r if use_preconditioned_residual else raw_residual
+            out = out & not_converged(residual_for_check, diff, y)
             out = out & (step < max_steps)
             # The first pass uses a dummy value for r0 in order to save on compiling
             # an extra matvec. The dummy step may raise a breakdown, and `step == 0`
@@ -166,6 +189,7 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
             (
                 y,
                 r,
+                _,
                 deferred_breakdown,
                 _,
                 diff,
@@ -174,7 +198,14 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
                 stagnation_counter,
                 inner_steps,
             ) = carry
-            y_new, r_new, breakdown, diff_new, inner_steps_delta = self._gmres_compute(
+            (
+                y_new,
+                r_new,
+                raw_residual_new,
+                breakdown,
+                diff_new,
+                inner_steps_delta,
+            ) = self._gmres_compute(
                 operator, vector, y, r, restart, preconditioner, step == 0
             )
 
@@ -195,6 +226,7 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
             return (
                 y_new,
                 r_new,
+                raw_residual_new,
                 breakdown,
                 deferred_breakdown,
                 diff_new,
@@ -210,7 +242,8 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
         r0 = ω(vector).call(jnp.zeros_like).ω
         init_carry = (
             y0,  # y
-            r0,  # residual
+            r0,  # precond. residual
+            r0,  # raw residual
             False,  # breakdown
             False,  # deferred_breakdown
             ω(y0).call(lambda x: jnp.full_like(x, jnp.inf)).ω,  # diff
@@ -222,6 +255,7 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
         (
             solution,
             residual,
+            raw_residual,
             _,  # breakdown
             breakdown,  # deferred_breakdown
             diff,
@@ -249,7 +283,8 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
         # breakdown is only an issue if we broke down outside the tolerance
         # of the solution. If we get breakdown and are within the tolerance,
         # this is called convergence :)
-        breakdown = breakdown & not_converged(residual, diff, solution)
+        residual_for_check = residual if use_preconditioned_residual else raw_residual
+        breakdown = breakdown & not_converged(residual_for_check, diff, solution)
         # breakdown is the most serious potential issue
         result = RESULTS.where(breakdown, RESULTS.breakdown, result)
 
@@ -338,9 +373,10 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
         y_new, diff, breakdown, inner_steps = lax.cond(
             first_pass, first_gmres, main_gmres, y
         )
-        r_new = preconditioner.mv((vector**ω - operator.mv(y_new) ** ω).ω)
+        raw_residual = (vector**ω - operator.mv(y_new) ** ω).ω
+        r_new = preconditioner.mv(raw_residual)
 
-        return y_new, r_new, breakdown, diff, inner_steps
+        return y_new, r_new, raw_residual, breakdown, diff, inner_steps
 
         # NOTE: in the jax implementation:
         # https://github.com/google/jax/blob/
