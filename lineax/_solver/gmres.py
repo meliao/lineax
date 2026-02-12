@@ -145,7 +145,7 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
                 return True
 
         def cond_fun(carry):
-            y, r, _, deferred_breakdown, diff, _, step, stagnation_counter = carry
+            y, r, _, deferred_breakdown, diff, _, step, stagnation_counter, _ = carry
             # NOTE: we defer ending due to breakdown by one loop! This is nonstandard,
             # but lets us use a cauchy-like condition in the convergence criteria.
             # If we do not defer breakdown, breakdown may detect convergence when
@@ -163,8 +163,18 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
 
         def body_fun(carry):
             # `breakdown` -> `deferred_breakdown` and `deferred_breakdown` -> `_`
-            y, r, deferred_breakdown, _, diff, r_min, step, stagnation_counter = carry
-            y_new, r_new, breakdown, diff_new = self._gmres_compute(
+            (
+                y,
+                r,
+                deferred_breakdown,
+                _,
+                diff,
+                r_min,
+                step,
+                stagnation_counter,
+                inner_steps,
+            ) = carry
+            y_new, r_new, breakdown, diff_new, inner_steps_delta = self._gmres_compute(
                 operator, vector, y, r, restart, preconditioner, step == 0
             )
 
@@ -191,6 +201,7 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
                 r_min,
                 step + 1,
                 stagnation_counter,
+                inner_steps + inner_steps_delta,
             )
 
         # Initialise the residual r0 to the dummy value of all 0s. This means
@@ -206,6 +217,7 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
             jnp.inf,  # r_min
             0,  # steps
             jnp.array(0),  # stagnation counter
+            0,  # inner steps
         )
         (
             solution,
@@ -216,6 +228,7 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
             _,
             num_steps,
             stagnation_counter,
+            num_inner_steps,
         ) = lax.while_loop(cond_fun, body_fun, init_carry)
 
         if self.max_steps is None:
@@ -240,7 +253,11 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
         # breakdown is the most serious potential issue
         result = RESULTS.where(breakdown, RESULTS.breakdown, result)
 
-        stats = {"num_steps": num_steps, "max_steps": self.max_steps}
+        stats = {
+            "num_steps": num_steps,
+            "num_inner_steps": num_inner_steps,
+            "max_steps": self.max_steps,
+        }
         return solution, result, stats
 
     def _gmres_compute(
@@ -312,16 +329,18 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
                 basis,
             )
             y_new = (y**ω + diff**ω).ω
-            return y_new, diff, breakdown
+            return y_new, diff, breakdown, steps
 
         def first_gmres(y):
-            return y, ω(y).call(lambda x: jnp.full_like(x, jnp.inf)).ω, False
+            return y, ω(y).call(lambda x: jnp.full_like(x, jnp.inf)).ω, False, 0
 
         first_pass = eqxi.unvmap_any(first_pass)
-        y_new, diff, breakdown = lax.cond(first_pass, first_gmres, main_gmres, y)
+        y_new, diff, breakdown, inner_steps = lax.cond(
+            first_pass, first_gmres, main_gmres, y
+        )
         r_new = preconditioner.mv((vector**ω - operator.mv(y_new) ** ω).ω)
 
-        return y_new, r_new, breakdown, diff
+        return y_new, r_new, breakdown, diff, inner_steps
 
         # NOTE: in the jax implementation:
         # https://github.com/google/jax/blob/

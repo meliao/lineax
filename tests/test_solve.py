@@ -33,9 +33,13 @@ def test_gmres_large_dense(getkey):
     true_x = jr.normal(getkey(), (100,))
     b = matrix @ true_x
 
-    lx_soln = lx.linear_solve(operator, b, solver).value
+    lx_soln = lx.linear_solve(operator, b, solver)
 
-    assert tree_allclose(lx_soln, true_x, atol=tol, rtol=tol)
+    assert tree_allclose(lx_soln.value, true_x, atol=tol, rtol=tol)
+
+    n_inner_steps = lx_soln.stats["num_inner_steps"]
+    n_outer_steps = lx_soln.stats["num_steps"]
+    assert n_outer_steps < n_inner_steps
 
 
 def test_nontrivial_pytree_operator():
