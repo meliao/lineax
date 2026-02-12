@@ -206,7 +206,14 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
                 diff_new,
                 inner_steps_delta,
             ) = self._gmres_compute(
-                operator, vector, y, r, restart, preconditioner, step == 0
+                operator,
+                vector,
+                y,
+                r,
+                restart,
+                preconditioner,
+                step == 0,
+                self.norm(b_scale) if has_scale else None,
             )
 
             #
@@ -296,7 +303,7 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
         return solution, result, stats
 
     def _gmres_compute(
-        self, operator, vector, y, r, restart, preconditioner, first_pass
+        self, operator, vector, y, r, restart, preconditioner, first_pass, scale_norm
     ):
         #
         # internal function for computing the bulk of the gmres. We seperate this out
@@ -307,6 +314,8 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
         # 2. Like the jax.scipy implementation we may want to add an incremental
         # version at a later date.
         #
+
+        use_inner_convergence = scale_norm is not None
 
         def main_gmres(y):
             # see the comment at the end of `_arnoldi_gram_schmidt` for a discussion
@@ -323,11 +332,14 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
             )
 
             def cond_fun(carry):
-                _, _, breakdown, step = carry
-                return (step < restart) & jnp.invert(breakdown)
+                _, _, breakdown, step, inner_converged = carry
+                out = (step < restart) & jnp.invert(breakdown)
+                if use_inner_convergence:
+                    out = out & jnp.invert(inner_converged)
+                return out
 
             def body_fun(carry):
-                basis, coeff_mat, breakdown, step = carry
+                basis, coeff_mat, breakdown, step, _ = carry
                 basis_new, coeff_mat_new, breakdown = self._arnoldi_gram_schmidt(
                     operator,
                     preconditioner,
@@ -338,25 +350,63 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
                     vector,
                     breakdown,
                 )
-                return basis_new, coeff_mat_new, breakdown, step + 1
+                if use_inner_convergence:
+                    coeff_mat_array = (
+                        coeff_mat_new._array
+                        if hasattr(coeff_mat_new, "_array")
+                        else coeff_mat_new
+                    )
+                    mask = jnp.arange(restart) <= step
+                    mask = mask.astype(coeff_mat_array.dtype)
+                    coeff_mat_masked = coeff_mat_array * mask[:, None]
+                    beta_vec = jnp.concatenate(
+                        (
+                            r_norm[None].astype(jnp.result_type(coeff_mat_masked)),
+                            jnp.zeros_like(coeff_mat_masked, shape=(restart,)),
+                        )
+                    )
+                    z, _, _, _ = jnp.linalg.lstsq(
+                        coeff_mat_masked.T, beta_vec, rcond=None
+                    )
+                    residual_est = beta_vec - coeff_mat_masked.T @ z
+                    residual_est_norm = self.norm(residual_est)
+                    inner_converged = residual_est_norm <= scale_norm
+                else:
+                    inner_converged = False
+                return basis_new, coeff_mat_new, breakdown, step + 1, inner_converged
 
             def buffers(carry):
-                basis, coeff_mat, _, _ = carry
+                basis, coeff_mat, _, _, _ = carry
                 return basis, coeff_mat
 
-            init_carry = (basis_init, coeff_mat_init, initial_breakdown, 0)
-            basis, coeff_mat, breakdown, steps = eqxi.while_loop(
+            init_carry = (basis_init, coeff_mat_init, initial_breakdown, 0, False)
+            basis, coeff_mat, breakdown, steps, _ = eqxi.while_loop(
                 cond_fun, body_fun, init_carry, kind="lax", buffers=buffers
             )
-            beta_vec = jnp.concatenate(
-                (
-                    r_norm[None].astype(jnp.result_type(coeff_mat)),
-                    jnp.zeros_like(coeff_mat, shape=(restart,)),
+            if use_inner_convergence:
+                coeff_mat_array = (
+                    coeff_mat._array if hasattr(coeff_mat, "_array") else coeff_mat
                 )
-            )
-            coeff_op_transpose = MatrixLinearOperator(coeff_mat.T)
-            # TODO(raderj): move to a Hessenberg-specific solver
-            z = linear_solve(coeff_op_transpose, beta_vec, QR(), throw=False).value
+                mask = jnp.arange(restart) < steps
+                mask = mask.astype(coeff_mat_array.dtype)
+                coeff_mat_masked = coeff_mat_array * mask[:, None]
+                beta_vec = jnp.concatenate(
+                    (
+                        r_norm[None].astype(jnp.result_type(coeff_mat_masked)),
+                        jnp.zeros_like(coeff_mat_masked, shape=(restart,)),
+                    )
+                )
+                z, _, _, _ = jnp.linalg.lstsq(coeff_mat_masked.T, beta_vec, rcond=None)
+            else:
+                beta_vec = jnp.concatenate(
+                    (
+                        r_norm[None].astype(jnp.result_type(coeff_mat)),
+                        jnp.zeros_like(coeff_mat, shape=(restart,)),
+                    )
+                )
+                coeff_op_transpose = MatrixLinearOperator(coeff_mat.T)
+                # TODO(raderj): move to a Hessenberg-specific solver
+                z = linear_solve(coeff_op_transpose, beta_vec, QR(), throw=False).value
             diff = jtu.tree_map(
                 lambda mat: jnp.tensordot(
                     mat[..., :-1], z, axes=1, precision=lax.Precision.HIGHEST

@@ -42,6 +42,38 @@ def test_gmres_large_dense(getkey):
     assert n_outer_steps < n_inner_steps
 
 
+def test_gmres_preconditioned(getkey):
+    if jax.config.jax_enable_x64:  # pyright: ignore
+        tol = 1e-10
+    else:
+        tol = 1e-4
+    solver = lx.GMRES(atol=tol, rtol=tol, restart=50)
+
+    SIZE = 200
+    poisson_matrix = construct_poisson_matrix(SIZE)
+    poisson_operator = lx.MatrixLinearOperator(
+        poisson_matrix, tags=(lx.negative_semidefinite_tag, lx.symmetric_tag)
+    )
+    rhs = jr.normal(getkey(), (SIZE,))
+
+    # No preconditioner.
+    sol_no_pc = lx.linear_solve(poisson_operator, rhs, solver)
+
+    # Diagonal preconditioner M ≈ A^{-1}, so M A ≈ I.
+    diag_entries = jnp.diag(poisson_matrix)
+    preconditioner = lx.DiagonalLinearOperator(1.0 / diag_entries)
+    sol_pc = lx.linear_solve(
+        poisson_operator,
+        rhs,
+        solver,
+        options={
+            "preconditioner": preconditioner,
+        },
+    )
+
+    assert tree_allclose(sol_no_pc.value, sol_pc.value, atol=tol, rtol=tol)
+
+
 def test_nontrivial_pytree_operator():
     x = [[1, 5.0], [jnp.array(-2), jnp.array(-2.0)]]
     y = [3, 4]
