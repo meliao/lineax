@@ -796,7 +796,7 @@ def raw_linear_solve(
     *,
     options: dict[str, Any] | None = None,
     in_structure: PyTree[jax.ShapeDtypeStruct] | None = None,
-):
+) -> tuple:
     """Solve `matvec(x) = vector` by calling `solver.init`/`solver.compute` directly,
     bypassing [`lineax.linear_solve`][]'s operator/autodiff/jit machinery entirely.
 
@@ -830,7 +830,9 @@ def raw_linear_solve(
         in_structure = jax.eval_shape(lambda: vector)
     operator = RawLinearOperator(matvec, in_structure)
     state = solver.init(operator, options)
-    return solver.compute(state, vector, options)
+    solution, result, stats = solver.compute(state, vector, options)
+    return solution, result, stats
+
 
 
 # Work around JAX issue #22011,

@@ -8,7 +8,6 @@ import logging
 jax.config.update("jax_log_compiles", True)
 jax.config.update("jax_explain_cache_misses", True)
 
-@jax.jit
 def matvec(A_data, x):
     # A module-level function, closed over nothing -- reusable and testable on its
     # own, independent of any particular `solve` call.
@@ -21,6 +20,8 @@ def main():
 
     trace_count = 0
 
+    matvec_jit = jax.jit(matvec)
+
     def solve(A_data, b):
         # Counting here works because this function body (including the
         # `functools.partial` below) only actually runs while JAX is *tracing* -- a
@@ -29,7 +30,7 @@ def main():
         nonlocal trace_count
         trace_count += 1
 
-        mv = functools.partial(matvec, A_data)
+        mv = functools.partial(matvec_jit, A_data)
         solution, result, stats = lx.raw_linear_solve(mv, b, solver)
         return solution, result, stats
 
