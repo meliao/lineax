@@ -14,6 +14,7 @@
 
 import abc
 import functools as ft
+from collections.abc import Callable
 from typing import Any, Generic, TypeAlias, TypeVar
 
 import equinox as eqx
@@ -41,6 +42,7 @@ from ._operator import (
     is_tridiagonal,
     is_upper_triangular,
     linearise,
+    RawLinearOperator,
     TangentLinearOperator,
 )
 from ._solution import RESULTS, Solution
@@ -785,6 +787,50 @@ def linear_solve(
     # TODO: prevent forward-mode autodiff through stats
     stats = eqxi.nondifferentiable_backward(stats)
     return Solution(value=solution, result=result, state=state, stats=stats)
+
+
+def raw_linear_solve(
+    matvec: Callable[[PyTree[ArrayLike]], PyTree[ArrayLike]],
+    vector: PyTree[ArrayLike],
+    solver: AbstractLinearSolver,
+    *,
+    options: dict[str, Any] | None = None,
+    in_structure: PyTree[jax.ShapeDtypeStruct] | None = None,
+):
+    """Solve `matvec(x) = vector` by calling `solver.init`/`solver.compute` directly,
+    bypassing [`lineax.linear_solve`][]'s operator/autodiff/jit machinery entirely.
+
+    This is useful when solving a sequence of problems with different matvecs (e.g.
+    different matrices), where wrapping each one in a fresh
+    [`lineax.FunctionLinearOperator`][] and going through `lineax.linear_solve` would
+    otherwise cause spurious recompilation. See [`lineax.RawLinearOperator`][] for
+    details of why, and for how to structure your own `jax.jit` to avoid retracing.
+
+    Only solvers whose `.init`/`.compute` rely solely on `.mv`, `.in_structure`,
+    `.out_structure` (e.g. [`lineax.GMRES`][]) are supported. There is no autodiff
+    support, no automatic NaN/singular checking (inspect the returned `result`
+    yourself), and no reuse of `state` across calls with different operators.
+
+    **Arguments:**
+
+    - `matvec`: a plain Python/JAX function implementing the linear operator.
+    - `vector`: the right-hand side.
+    - `solver`: an [`lineax.AbstractLinearSolver`][], e.g. `lineax.GMRES(...)`.
+    - `options`: as passed to `solver.compute`.
+    - `in_structure`: the input pytree structure of `matvec`, if it differs from
+        `vector`'s structure. Defaults to `jax.eval_shape(lambda: vector)`.
+
+    **Returns:**
+
+    The `(solution, result, stats)` tuple returned by `solver.compute`.
+    """
+    if options is None:
+        options = {}
+    if in_structure is None:
+        in_structure = jax.eval_shape(lambda: vector)
+    operator = RawLinearOperator(matvec, in_structure)
+    state = solver.init(operator, options)
+    return solver.compute(state, vector, options)
 
 
 # Work around JAX issue #22011,

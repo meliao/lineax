@@ -27,11 +27,14 @@ from .._misc import strip_weak_dtype, structure_equal
 from .._operator import (
     AbstractLinearOperator,
     IdentityLinearOperator,
+    RawLinearOperator,
 )
 
 
 def preconditioner_and_y0(
-    operator: AbstractLinearOperator, vector: PyTree[Array], options: dict[str, Any]
+    operator: AbstractLinearOperator | RawLinearOperator,
+    vector: PyTree[Array],
+    options: dict[str, Any],
 ):
     structure = operator.in_structure()
     try:
@@ -39,7 +42,11 @@ def preconditioner_and_y0(
     except KeyError:
         preconditioner = IdentityLinearOperator(structure)
     else:
-        if not isinstance(preconditioner, AbstractLinearOperator):
+        if not (
+            hasattr(preconditioner, "mv")
+            and hasattr(preconditioner, "in_structure")
+            and hasattr(preconditioner, "out_structure")
+        ):
             raise ValueError("The preconditioner must be a linear operator.")
         if not structure_equal(preconditioner.in_structure(), structure):
             raise ValueError(

@@ -727,6 +727,58 @@ class FunctionLinearOperator(AbstractLinearOperator):
         )
 
 
+class RawLinearOperator:
+    """A minimal, non-pytree stand-in for [`lineax.AbstractLinearOperator`][].
+
+    Implements just enough (`mv`, `in_structure`, `out_structure`) to drive an
+    iterative solver like [`lineax.GMRES`][] directly via `solver.init`/
+    `solver.compute` (or [`lineax.raw_linear_solve`][]), without the `eqx.Module`/
+    pytree registration, `eqx.filter_closure_convert` tracing, or
+    [`lineax.linear_solve`][] primitive/autodiff machinery that
+    [`lineax.FunctionLinearOperator`][] and `lineax.linear_solve` carry.
+
+    This avoids a common source of spurious recompilation: constructing a new
+    `FunctionLinearOperator` from a fresh Python closure retraces that closure into
+    a fresh `Jaxpr` each time, which is compared by identity inside
+    `eqx.filter_jit`'s cache and so busts the cache on every call. `RawLinearOperator`
+    does no such tracing, so it is cheap to construct repeatedly.
+
+    Trade-offs versus `FunctionLinearOperator`:
+
+    - No autodiff support (`.transpose()`/`.conj()` are not implemented) — do not
+      pass this through `lineax.linear_solve`.
+    - No structure checking of `mv`'s output against `out_structure` — assumed
+      square by default.
+    - Because it isn't a pytree, it must be constructed *inside* whatever
+      `jax.jit`-traced function you write yourself; do not pass an instance of
+      this class as a `jax.jit` argument.
+    """
+
+    def __init__(self, mv, in_structure, out_structure=None):
+        """**Arguments:**
+
+        - `mv`: a linear function, accepting and returning a PyTree of
+            floating-point JAX arrays.
+        - `in_structure`: A PyTree of `jax.ShapeDtypeStruct`s specifying the
+            structure of the input to `mv`.
+        - `out_structure`: A PyTree of `jax.ShapeDtypeStruct`s specifying the
+            structure of the output of `mv`. Defaults to `in_structure` (i.e. the
+            operator is assumed square).
+        """
+        self._mv = mv
+        self._in_structure = in_structure
+        self._out_structure = in_structure if out_structure is None else out_structure
+
+    def mv(self, vector):
+        return self._mv(vector)
+
+    def in_structure(self):
+        return self._in_structure
+
+    def out_structure(self):
+        return self._out_structure
+
+
 # `structure` must be static as with `JacobianLinearOperator`
 class IdentityLinearOperator(AbstractLinearOperator):
     """Represents the identity transformation `X -> X`, where each `x in X` is some

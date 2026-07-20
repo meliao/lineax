@@ -74,6 +74,52 @@ def test_gmres_preconditioned(getkey):
     assert tree_allclose(sol_no_pc.value, sol_pc.value, atol=tol, rtol=tol)
 
 
+def test_raw_linear_solve_matches_linear_solve(getkey):
+    if jax.config.jax_enable_x64:  # pyright: ignore
+        tol = 1e-10
+    else:
+        tol = 1e-4
+    solver = lx.GMRES(atol=tol, rtol=tol, restart=100)
+
+    matrix = jr.normal(getkey(), (100, 100))
+    true_x = jr.normal(getkey(), (100,))
+    b = matrix @ true_x
+
+    operator = lx.MatrixLinearOperator(matrix)
+    lx_soln = lx.linear_solve(operator, b, solver)
+
+    raw_soln, raw_result, raw_stats = lx.raw_linear_solve(
+        lambda x: matrix @ x, b, solver
+    )
+
+    assert raw_result == lx.RESULTS.successful
+    assert tree_allclose(raw_soln, true_x, atol=tol, rtol=tol)
+    assert tree_allclose(raw_soln, lx_soln.value, atol=tol, rtol=tol)
+    assert raw_stats["num_steps"] == lx_soln.stats["num_steps"]
+
+
+def test_raw_linear_solve_no_retrace(getkey):
+    solver = lx.GMRES(atol=1e-4, rtol=1e-4, restart=20)
+    n = 20
+
+    trace_count = 0
+
+    def solve(matrix, b):
+        nonlocal trace_count
+        trace_count += 1
+        solution, result, _ = lx.raw_linear_solve(lambda x: matrix @ x, b, solver)
+        return solution, result
+
+    solve_jit = jax.jit(solve)
+
+    for _ in range(3):
+        matrix = jnp.eye(n) + 0.01 * jr.normal(getkey(), (n, n))
+        b = jr.normal(getkey(), (n,))
+        solve_jit(matrix, b)
+
+    assert trace_count == 1
+
+
 def test_nontrivial_pytree_operator():
     x = [[1, 5.0], [jnp.array(-2), jnp.array(-2.0)]]
     y = [3, 4]

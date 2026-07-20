@@ -40,6 +40,7 @@ from ._operator import (
     MulLinearOperator as MulLinearOperator,
     NegLinearOperator as NegLinearOperator,
     PyTreeLinearOperator as PyTreeLinearOperator,
+    RawLinearOperator as RawLinearOperator,
     TaggedLinearOperator as TaggedLinearOperator,
     TangentLinearOperator as TangentLinearOperator,
     tridiagonal as tridiagonal,
@@ -50,6 +51,7 @@ from ._solve import (
     AbstractLinearSolver as AbstractLinearSolver,
     AutoLinearSolver as AutoLinearSolver,
     linear_solve as linear_solve,
+    raw_linear_solve as raw_linear_solve,
 )
 from ._solver import (
     BiCGStab as BiCGStab,

@@ -30,6 +30,7 @@ from .._operator import (
     AbstractLinearOperator,
     conj,
     MatrixLinearOperator,
+    RawLinearOperator,
 )
 from .._solution import RESULTS
 from .._solve import AbstractLinearSolver, linear_solve
@@ -37,7 +38,7 @@ from .misc import preconditioner_and_y0
 from .qr import QR
 
 
-_GMRESState: TypeAlias = AbstractLinearOperator
+_GMRESState: TypeAlias = AbstractLinearOperator | RawLinearOperator
 
 
 class GMRES(AbstractLinearSolver[_GMRESState]):
@@ -83,7 +84,9 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
                     "of all three)."
                 )
 
-    def init(self, operator: AbstractLinearOperator, options: dict[str, Any]):
+    def init(
+        self, operator: AbstractLinearOperator | RawLinearOperator, options: dict[str, Any]
+    ):
         del options
         if not structure_equal(operator.in_structure(), operator.out_structure()):
             raise ValueError(
